@@ -16,22 +16,17 @@ import sounddevice as sd
 from playsound import playsound
 import pygame
 from scipy.io import wavfile
+from together import Together
+from streamlit.runtime.scriptrunner import RerunData, RerunException
+from streamlit.source_util import get_pages
 
 pygame.mixer.init()
 
 # Load environment variables
 load_dotenv()
 
-AI71_BASE_URL = "https://api.ai71.ai/v1/"
-AI71_API_KEY = os.getenv('AI71_API_KEY')
-
-# Initialize the Falcon model
-chat = ChatOpenAI(
-    model="tiiuae/falcon-180B-chat",
-    api_key=AI71_API_KEY,
-    base_url=AI71_BASE_URL,
-    streaming=True,
-)
+# Initialize the Together client
+client = Together(api_key=os.environ.get('TOGETHER_API_KEY'))
 
 # Expanded Therapy techniques
 THERAPY_TECHNIQUES = {
@@ -55,10 +50,22 @@ def get_ai_response(user_input, buddy_config, therapy_technique=None):
         system_message += f"In this conversation, {THERAPY_TECHNIQUES[therapy_technique]}"
     
     messages = [
-        SystemMessage(content=system_message),
-        HumanMessage(content=user_input)
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_input}
     ]
-    response = chat.invoke(messages).content
+
+    response = client.chat.completions.create(
+        model="meta-llama/Meta-Llama-3-8B-Instruct-Lite",
+        messages=messages,
+        max_tokens=512,
+        temperature=0.7,
+        top_p=0.7,
+        top_k=50,
+        repetition_penalty=1,
+        stop=["<|eot_id|>"],
+        stream=True
+    )
+
     return response
 
 def play_sound_loop(sound_file, stop_event):
@@ -516,12 +523,8 @@ def main():
         # Chat interface
         st.header("🗨️ Chat with Your AI Buddy")
         
-        # Display chat history
+        # Create a container for the chat history
         chat_container = st.container()
-        with chat_container:
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
         
         # User input
         prompt = st.chat_input("What's on your mind?")
@@ -531,10 +534,17 @@ def main():
             st.session_state.messages = []
             st.experimental_rerun()
 
+        # Display chat history
+        with chat_container:
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
         if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            with chat_container:
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
             buddy_config = {
                 "name": st.session_state.buddy_name,
@@ -542,17 +552,16 @@ def main():
                 "details": st.session_state.buddy_details
             }
 
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                full_response = ""
-                for chunk in chat.stream(get_ai_response(prompt, buddy_config, therapy_technique)):
-                    full_response += chunk.content
-                    message_placeholder.markdown(full_response + "▌")
-                message_placeholder.markdown(full_response)
+            with chat_container:
+                with st.chat_message("assistant"):
+                    message_placeholder = st.empty()
+                    full_response = ""
+                    for chunk in get_ai_response(prompt, buddy_config, therapy_technique):
+                        if chunk.choices[0].delta.content is not None:
+                            full_response += chunk.choices[0].delta.content
+                            message_placeholder.markdown(full_response + "▌")
+                    message_placeholder.markdown(full_response)
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-
-            # Force a rerun to update the chat history immediately
-            st.experimental_rerun()
 
     with tab2:
         tool_choice = st.selectbox("Select a tool", ["Meditation Timer", "Binaural Beats", "Recommendations"])
@@ -658,4 +667,6 @@ def main():
             st.sidebar.success(f"Unlocked: {achievement}")
 
 if __name__ == "__main__":
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
     main()
